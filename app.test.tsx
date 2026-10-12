@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it } from "vitest";
-import { fireEvent, waitFor } from "@testing-library/react";
+import { act, fireEvent, waitFor } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import app, { totals } from "./app";
 import type { ChangedFile, RepositoryChanges, Snapshot } from "./contracts";
@@ -47,21 +47,33 @@ it("counts a staged and unstaged file once, and opens the selected repository's 
   expect(slot.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "diff", title: "Cargo.cs", params: { repositoryPath: "/workspace/repos/cargo", label: "repos/cargo", path: "Cargo.cs", layer: "staged" } } });
   expect(slot.inspection.rpcCalls.find(call => call.method === "status")).toMatchObject({ method: "status", input: { threadId: "one" } });
 });
-it("keeps the banner hidden for a thread that has not modified a repository", async () => {
-  const slot = await banner(() => ({ repositories: [], errors: [], trackedCount: 0, trackingPending: false }));
+it.each([0, 2])("keeps the banner hidden without changes, with %i tracked repositories", async trackedCount => {
+  const slot = await banner(() => ({ repositories: [], errors: [], trackedCount, trackingPending: false }));
   await waitFor(() => expect(slot.inspection.rpcCalls.filter(call => call.method === "status").length).toBe(1));
+  await act(async () => {});
   expect(slot.queryByText("Focused Diff")).toBeNull();
 });
-it("updates the summary on Refresh and shows a request failure instead of silently hiding it", async () => {
+it("hides a clean summary on Refresh, reappears on changes, and shows request failures", async () => {
   let state = snapshot(), failure = false;
   const slot = await banner(() => { if (failure) throw new Error("Host unavailable"); return state; });
   await slot.findByText("Focused Diff");
   state = { repositories: [], errors: [], trackedCount: 1, trackingPending: false };
   fireEvent.click(slot.getByRole("button", { name: "Refresh focused diff" }));
-  await slot.findByText("0 repos, 0 files");
+  await waitFor(() => expect(slot.queryByText("Focused Diff")).toBeNull());
+  state = snapshot();
+  await slot.behavior.emitRealtime("tracked", { threadId: "one" });
+  await slot.findByText("Focused Diff");
   failure = true;
   fireEvent.click(slot.getByRole("button", { name: "Refresh focused diff" }));
   expect(await slot.findByRole("alert")).toHaveProperty("textContent", "Host unavailable");
+});
+it("keeps zero-line file changes, Git errors, and pending history visible", async () => {
+  const binary = await banner(() => ({ ...snapshot(), repositories: [{ ...repository, files: [{ ...file("unstaged"), binary: true, additions: 0, deletions: 0 }] }] }));
+  await binary.findByText("Focused Diff");
+  expect(binary.getByText("1 repo, 1 file")).toBeTruthy();
+  const pending = await banner(() => ({ repositories: [], errors: ["Git unavailable"], trackedCount: 1, trackingPending: true }));
+  expect(await pending.findByRole("alert")).toHaveProperty("textContent", "Git unavailable");
+  expect(pending.getByRole("status")).toHaveProperty("textContent", "Reading the remaining thread history…");
 });
 it("loads the selected file through RPC and switches the native viewer to Split", async () => {
   const loaded = await loadPluginApp(app);

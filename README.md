@@ -40,6 +40,8 @@ This is repository-level scope, not line authorship. Your edits and another agen
 
 The banner and open diff refresh every five seconds and pause periodic reads while the browser is hidden. **Refresh** updates immediately. Closing the UI stops its polling.
 
+The banner hides when there are no changed files. It keeps watching for new changes and reappears automatically. Git errors and pending history remain visible; binary files and renames can still appear with zero line counts.
+
 Binary files show a notice. New text files above 512 KiB and patches above 2 MiB show size notices. Incomplete line totals are marked **partial**. A thread supports 128 registered repositories and each repository supports 2000 change entries. Git errors and exceeded limits are shown explicitly. Missing or replaced repository paths are rejected instead of falling back to the parent repository.
 
 ## Develop

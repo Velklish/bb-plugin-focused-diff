@@ -88,8 +88,8 @@ function EnabledChangesBanner() {
   const load = useCallback(() => rpc.call("status", { threadId }), [rpc, threadId]);
   const { data, error, refetch } = usePolling<Snapshot>(load);
   const [expanded, setExpanded] = useState(false);
-  if ((!data || data.trackedCount === 0) && !data?.trackingPending && !error && !data?.errors.length) return null;
   const repositories = data?.repositories ?? [], tally = totals(repositories);
+  if (tally.files === 0 && !data?.trackingPending && !error && !data?.errors.length) return null;
   return <div>
     <div className="flex min-h-10 items-center gap-1 px-2">
       <button type="button" className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" aria-expanded={expanded} aria-controls={`focused-diff-${threadId}`} onClick={() => setExpanded(value => !value)}>
