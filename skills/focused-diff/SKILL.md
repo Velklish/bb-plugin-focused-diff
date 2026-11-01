@@ -9,6 +9,8 @@ If the tool is unavailable in an already-running provider session, use `bb focus
 
 Register only repositories you modify. Do not register repositories you merely read or temporary test fixtures. Registration changes thread metadata, not repository files or Git state.
 
-Use `bb focused-diff status --json` to inspect current changes. Staged, unstaged, and untracked changes from the thread's registered repositories are included. Commits disappear from this current-diff view; it does not determine line authorship.
+Use `bb focused-diff status --json` to inspect current changes. It includes the current checkout without registration and additional repositories registered by this thread. `uncommitted` entries show net HEAD-to-working-tree changes, including untracked files. `committed` entries show branch changes from the merge base against `baseBranch`. Each repository reports its own branch and comparison error, if any. This view does not determine line authorship.
+
+The Changes card groups both sections by repository and replaces the native Git summary in that composer while a successful snapshot is available. It restores the native summary on failure or plugin disable without changing the global Show Git changes setting.
 
 The plugin must be enabled for the thread's Project in Settings → Installed plugins → Focused Diff → Enabled Project. Other Projects are excluded from tracking and Git reads.

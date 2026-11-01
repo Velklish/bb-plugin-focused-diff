@@ -86,20 +86,23 @@ export default async function plugin(bb: BbPluginApi) {
       if (!env) return { repositories: [], errors: [], trackedCount: 0, trackingPending: false };
       const { state, pending } = await sync(threadId, env, await tracking(threadId));
       const repositoryPaths = state.repositories.filter(row => row.environmentId === env.id).map(row => row.path);
-      if (!repositoryPaths.length) return { repositories: [], errors: [], trackedCount: 0, trackingPending: pending };
-      const snapshot = await host.call("status", { rootPath: env.path, repositoryPaths }, { hostId: env.hostId, signal: controller.signal });
+      const mergeBaseBranch = env.mergeBaseBranch ?? env.baseBranch ?? env.defaultBranch;
+      const snapshot = await host.call("status", { rootPath: env.path, repositoryPaths, ...(mergeBaseBranch ? { mergeBaseBranch } : {}) }, { hostId: env.hostId, signal: controller.signal });
       return { ...snapshot, trackedCount: repositoryPaths.length, trackingPending: pending };
     });
   }
   bb.rpc.register(rpcContract, {
     scope: async ({ threadId }) => ({ enabled: !!enabledProject && (await bb.sdk.threads.get({ threadId, signal: controller.signal })).projectId === enabledProject }),
     status: ({ threadId }) => status(threadId),
-    diff: async ({ threadId, repositoryPath, path, layer }) => {
+    diff: async ({ threadId, repositoryPath, path, layer, baseBranch }) => {
       const env = await environment(threadId);
       if (!env) throw new Error("Focused Diff is not enabled for this Project, or this thread has no environment.");
       const state = await tracking(threadId);
-      if (!state.repositories.some(row => row.environmentId === env.id && row.path === repositoryPath)) throw new Error("Repository is not tracked by this thread.");
-      return host.call("diff", { rootPath: env.path, repositoryPath, path, layer }, { hostId: env.hostId, signal: controller.signal });
+      if (!state.repositories.some(row => row.environmentId === env.id && row.path === repositoryPath)) {
+        const current = await host.call("resolve", { rootPath: env.path, paths: [env.path] }, { hostId: env.hostId, signal: controller.signal });
+        if (!current.repositories.includes(repositoryPath)) throw new Error("Repository is not tracked by this thread.");
+      }
+      return host.call("diff", { rootPath: env.path, repositoryPath, path, layer, ...(baseBranch ? { baseBranch } : {}) }, { hostId: env.hostId, signal: controller.signal });
     },
   });
   bb.events.on("experimental_thread.events", ({ thread }) => serial(thread.id, async () => {

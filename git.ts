@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, open, readlink, realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { copyFile, lstat, mkdtemp, open, readlink, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { ChangedFile, FileDiff, Layer, RepositoryChanges } from "./contracts";
 
@@ -9,11 +10,12 @@ const run = promisify(execFile);
 export const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 2000;
+type WorkingFile = ChangedFile & { recreated?: boolean; fromEmpty?: boolean };
 
-async function git(cwd: string, args: string[], signal?: AbortSignal, diffExit = false, maxBuffer = 4 * 1024 * 1024) {
+async function git(cwd: string, args: string[], signal?: AbortSignal, diffExit = false, maxBuffer = 4 * 1024 * 1024, env?: NodeJS.ProcessEnv) {
   try {
     return (await run("git", ["--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-C", cwd, ...args], {
-      encoding: "utf8", signal, timeout: 10_000, maxBuffer,
+      encoding: "utf8", signal, timeout: 10_000, maxBuffer, env,
     })).stdout;
   } catch (cause) {
     const error = cause as { code?: number | string; stdout?: string };
@@ -113,9 +115,9 @@ function numstats(raw: string) {
   }
   return stats;
 }
-async function untrackedInfo(repository: string, file: ChangedFile) {
+async function untrackedContent(repository: string, file: ChangedFile) {
   const path = resolve(repository, file.path), info = await lstat(path);
-  if (info.size > MAX_TEXT_BYTES) return { notice: `File exceeds ${MAX_TEXT_BYTES / 1024} KiB.`, additions: 0, binary: false };
+  if (info.size > MAX_TEXT_BYTES) return null;
   let content: Buffer;
   if (info.isSymbolicLink()) content = Buffer.from(await readlink(path));
   else {
@@ -128,10 +130,15 @@ async function untrackedInfo(repository: string, file: ChangedFile) {
         if (!chunk.bytesRead) break;
         bytesRead += chunk.bytesRead;
       }
-      if (bytesRead > MAX_TEXT_BYTES) return { notice: `File exceeds ${MAX_TEXT_BYTES / 1024} KiB.`, additions: 0, binary: false };
+      if (bytesRead > MAX_TEXT_BYTES) return null;
       content = buffer.subarray(0, bytesRead);
     } finally { await handle.close(); }
   }
+  return content;
+}
+async function untrackedInfo(repository: string, file: ChangedFile) {
+  const content = await untrackedContent(repository, file);
+  if (!content) return { notice: `File exceeds ${MAX_TEXT_BYTES / 1024} KiB.`, additions: 0, binary: false };
   const binary = content.includes(0);
   let additions = 0;
   if (!binary && content.length) {
@@ -140,56 +147,175 @@ async function untrackedInfo(repository: string, file: ChangedFile) {
   }
   return { binary, additions, notice: binary ? "Binary file." : null };
 }
-async function readRepository(repository: string, signal?: AbortSignal): Promise<RepositoryChanges> {
-  const [status, staged, unstaged, branch] = await Promise.all([
-    git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal),
-    git(repository, ["diff", "--cached", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--find-renames"], signal),
-    git(repository, ["diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--find-renames"], signal),
-    git(repository, ["branch", "--show-current"], signal),
+async function commitRef(repository: string, ref: string, signal?: AbortSignal) {
+  try { return (await git(repository, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], signal)).trim(); }
+  catch (cause) { if ((cause as { code?: number }).code === 1) return null; throw cause; }
+}
+function namedFiles(raw: string, layer: Layer): ChangedFile[] {
+  const parts = raw.split("\0"), files: ChangedFile[] = [];
+  for (let i = 0; i < parts.length && parts[i];) {
+    const status = parts[i++], firstPath = parts[i++];
+    const renamed = /^[RC]/.test(status);
+    files.push({ path: renamed ? parts[i++] : firstPath, oldPath: renamed ? firstPath : null, layer, status: status[0], additions: 0, deletions: 0, binary: false, notice: null });
+  }
+  return files;
+}
+const diffOptions = ["--no-ext-diff", "--no-textconv", "--find-renames"];
+async function comparisonFiles(repository: string, refs: string[], layer: Layer, signal?: AbortSignal) {
+  const [names, counts] = await Promise.all([
+    git(repository, ["diff", ...diffOptions, "--name-status", "-z", ...refs], signal),
+    git(repository, ["diff", ...diffOptions, "--numstat", "-z", ...refs], signal),
   ]);
-  const files = statusFiles(status);
+  const files = namedFiles(names, layer), tallies = numstats(counts);
+  for (const file of files) Object.assign(file, tallies.get(file.path));
+  return files;
+}
+async function recreatedChange(repository: string, file: ChangedFile, head: string, signal?: AbortSignal) {
+  const empty = { patch: null, notice: null, binary: false, additions: 0, deletions: 0 };
+  const entry = await git(repository, ["ls-tree", "-z", head, "--", file.path], signal);
+  const [mode, type, blob] = entry.slice(0, entry.indexOf("\t")).split(" ");
+  if (type !== "blob") return { ...empty, notice: "Recreated path was not a regular file or symlink." };
+  const current = await untrackedContent(repository, file);
+  if (!current) return { ...empty, notice: "Recreated file exceeds 512 KiB." };
+  const temporary = await mkdtemp(join(tmpdir(), "focused-diff-recreated-"));
+  try {
+    const index = join(temporary, "index"), sourceIndex = (await git(repository, ["rev-parse", "--path-format=absolute", "--git-path", "index"], signal)).trim();
+    await copyFile(sourceIndex, index);
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    await git(repository, ["-c", "core.splitIndex=false", "-c", `core.hooksPath=${temporary}`, "update-index", "--no-split-index", "--add", "--cacheinfo", mode, blob, file.path], signal, false, 4 * 1024 * 1024, env);
+    const args = ["diff", ...diffOptions], paths = ["--", file.path];
+    const [patch, counts] = await Promise.all([
+      git(repository, [...args, ...paths], signal, false, MAX_PATCH_BYTES, env),
+      git(repository, [...args, "--numstat", "-z", ...paths], signal, false, 4 * 1024 * 1024, env),
+    ]);
+    const tally = [...numstats(counts).values()].reduce((sum, value) => ({ additions: sum.additions + value.additions, deletions: sum.deletions + value.deletions, binary: sum.binary || value.binary }), { additions: 0, deletions: 0, binary: false });
+    return { ...tally, patch: tally.binary || !patch ? null : patch, notice: tally.binary ? "Binary file." : null };
+  } catch (cause) {
+    if ((cause as { code?: string }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return { ...empty, notice: "Diff exceeds 2 MiB." };
+    throw cause;
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+}
+async function workingFiles(repository: string, signal?: AbortSignal) {
+  const [status, head] = await Promise.all([
+    git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal),
+    commitRef(repository, "HEAD", signal),
+  ]);
+  const files: WorkingFile[] = await comparisonFiles(repository, head ? [head] : ["--cached"], "uncommitted", signal);
+  const porcelain = statusFiles(status);
+  if (new Set([...files, ...porcelain].map(file => file.path)).size > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
+  if (!head) {
+    for (let i = files.length - 1; i >= 0; i--) {
+      try { Object.assign(files[i], await untrackedInfo(repository, files[i])); }
+      catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") files.splice(i, 1); else throw cause; }
+    }
+  }
+  for (const untracked of porcelain.filter(file => file.layer === "untracked")) {
+    const deletion = files.findIndex(file => file.path === untracked.path && file.status === "D");
+    const rename = files.find(file => file.oldPath === untracked.path && file.status === "R");
+    if (rename) {
+      Object.assign(rename, { oldPath: null, status: "A", fromEmpty: true }, await untrackedInfo(repository, rename));
+    }
+    if (head && (deletion >= 0 || rename)) {
+      if (deletion >= 0) files.splice(deletion, 1);
+      const recreated = { ...untracked, layer: "uncommitted" as const, status: "M", recreated: true };
+      const { patch, ...info } = await recreatedChange(repository, recreated, head, signal);
+      if (patch || info.notice) files.push({ ...recreated, ...info });
+    } else files.push({ ...untracked, layer: "uncommitted" });
+  }
+  for (const conflict of porcelain.filter(file => file.status.includes("U") || file.status === "AA" || file.status === "DD")) {
+    const existing = files.find(file => file.path === conflict.path);
+    if (existing) Object.assign(existing, { status: "U", notice: "Unresolved merge conflict." });
+    else files.push({ ...conflict, layer: "uncommitted", status: "U", notice: "Unresolved merge conflict." });
+  }
   if (files.length > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
-  const tallies = { staged: numstats(staged), unstaged: numstats(unstaged) };
   for (const file of files) {
     signal?.throwIfAborted();
-    if (file.layer === "untracked") Object.assign(file, await untrackedInfo(repository, file));
-    else Object.assign(file, tallies[file.layer].get(file.path));
+    if (file.status === "??") Object.assign(file, await untrackedInfo(repository, file));
   }
-  return { path: repository, label: repository, branch: branch.trim() || "detached HEAD", files };
+  return files;
 }
-export async function collectChanges(rootPath: string, repositoryPaths: string[], signal?: AbortSignal) {
+async function comparisonBase(repository: string, configured: string | null | undefined, signal?: AbortSignal) {
+  if (configured) {
+    const commit = await commitRef(repository, configured, signal);
+    if (!commit) throw new Error(`Base branch ${configured} is unavailable.`);
+    return { branch: configured, commit };
+  }
+  let remoteHead = "";
+  try { remoteHead = (await git(repository, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], signal)).trim(); }
+  catch (cause) { if ((cause as { code?: number }).code !== 1) throw cause; }
+  for (const branch of [remoteHead, "origin/main", "origin/master", "main", "master"].filter(Boolean)) {
+    const commit = await commitRef(repository, branch, signal);
+    if (commit) return { branch, commit };
+  }
+  return null;
+}
+async function mergeBase(repository: string, base: string, signal?: AbortSignal) {
+  try { return (await git(repository, ["merge-base", "HEAD", base], signal)).trim(); }
+  catch (cause) { if ((cause as { code?: number }).code === 1) throw new Error("The base branch and HEAD have no common ancestor."); throw cause; }
+}
+async function readRepository(repository: string, signal?: AbortSignal, configuredBase?: string | null): Promise<RepositoryChanges> {
+  const [files, branch, head] = await Promise.all([workingFiles(repository, signal), git(repository, ["branch", "--show-current"], signal), commitRef(repository, "HEAD", signal)]);
+  let baseBranch: string | null = null, comparisonError: string | null = null;
+  if (head) {
+    try {
+      const base = await comparisonBase(repository, configuredBase, signal);
+      if (base) {
+        baseBranch = base.branch;
+        files.push(...await comparisonFiles(repository, [await mergeBase(repository, base.commit, signal), head], "committed", signal));
+      }
+    } catch (cause) { if (signal?.aborted) throw cause; comparisonError = message(cause); }
+  }
+  if (files.length > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
+  return { path: repository, label: repository, branch: branch.trim() || "detached HEAD", files, baseBranch, comparisonError };
+}
+export async function collectChanges(rootPath: string, repositoryPaths: string[], signal?: AbortSignal, mergeBaseBranch?: string | null) {
   const root = await scopeRoot(rootPath, signal);
-  const repositories: RepositoryChanges[] = [], errors: string[] = [];
-  for (const requested of [...new Set(repositoryPaths)].sort()) {
+  const current = await resolveRepositories(rootPath, [rootPath], signal);
+  const repositories: RepositoryChanges[] = [], errors: string[] = [...current.errors];
+  for (const requested of [...new Set([...current.repositories, ...repositoryPaths])].sort()) {
     try {
       const path = await registeredRepository(rootPath, requested, signal);
-      const repository = await readRepository(path, signal);
-      if (repository.files.length) repositories.push({ ...repository, label: relative(root, path) || basename(path) });
+      const repository = await readRepository(path, signal, current.repositories.includes(path) ? mergeBaseBranch : undefined);
+      if (repository.files.length || repository.comparisonError) repositories.push({ ...repository, label: relative(root, path) || basename(path) });
     } catch (cause) {
       if (signal?.aborted) throw cause;
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
       errors.push(`${relative(root, requested) || "."}: ${message(cause)}`);
     }
   }
   return { repositories, errors: errors.slice(0, 128) };
 }
-export async function readDiff(rootPath: string, repositoryPath: string, path: string, layer: Layer, signal?: AbortSignal): Promise<FileDiff> {
+export async function readDiff(rootPath: string, repositoryPath: string, path: string, layer: Layer, signal?: AbortSignal, baseBranch?: string): Promise<FileDiff> {
   if (isAbsolute(path) || path.split(/[\\/]/).some(part => part === ".." || part === ".git")) throw new Error("File path must stay inside the repository.");
   const repository = await registeredRepository(rootPath, repositoryPath, signal);
-  const files = statusFiles(await git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal));
+  let refs: string[] = [];
+  let files: WorkingFile[];
+  if (layer === "committed") {
+    const base = await comparisonBase(repository, baseBranch, signal);
+    if (!base) return { patch: null, notice: "No base branch is available.", binary: false };
+    refs = [await mergeBase(repository, base.commit, signal), "HEAD"];
+    files = await comparisonFiles(repository, refs, layer, signal);
+  } else if (layer === "uncommitted") {
+    files = await workingFiles(repository, signal);
+    const head = await commitRef(repository, "HEAD", signal);
+    if (head) refs = [head];
+  } else files = statusFiles(await git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal));
   const file = files.find(file => file.path === path && file.layer === layer);
   if (!file) return { patch: null, notice: "This change is no longer present. Refresh the list.", binary: false };
-  if (layer === "untracked") {
+  if (file.recreated) return recreatedChange(repository, file, refs[0], signal);
+  const newFile = layer === "untracked" || (layer === "uncommitted" && (file.status === "??" || file.fromEmpty || !refs.length));
+  if (newFile) {
     const info = await untrackedInfo(repository, file);
     if (info.notice) return { patch: null, notice: info.notice, binary: info.binary };
   }
-  const args = layer === "untracked"
+  const args = newFile
     ? ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", process.platform === "win32" ? "NUL" : "/dev/null", path]
-    : ["diff", ...(layer === "staged" ? ["--cached"] : []), "--no-ext-diff", "--no-textconv", "--find-renames", "--", ...(file.oldPath ? [file.oldPath] : []), path];
+    : ["diff", ...(layer === "staged" ? ["--cached"] : refs), ...diffOptions, "--", ...(file.oldPath ? [file.oldPath] : []), path];
   try {
-    const patch = await git(repository, args, signal, layer === "untracked", MAX_PATCH_BYTES);
+    const patch = await git(repository, args, signal, newFile, MAX_PATCH_BYTES);
     if (Buffer.byteLength(patch) > MAX_PATCH_BYTES) return { patch: null, notice: "Diff exceeds 2 MiB.", binary: false };
     const binary = /^Binary files /m.test(patch);
-    return { patch: binary ? null : patch, notice: binary ? "Binary file." : patch ? null : "Empty diff.", binary };
+    return { patch: binary ? null : patch || null, notice: binary ? "Binary file." : file.notice || (patch ? null : "Empty diff."), binary };
   } catch (cause) {
     if ((cause as { code?: string }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return { patch: null, notice: "Diff exceeds 2 MiB.", binary: false };
     throw cause;

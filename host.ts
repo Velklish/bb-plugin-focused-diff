@@ -6,7 +6,7 @@ export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
     resolve: ({ rootPath, paths }, context) => resolveRepositories(rootPath, paths, context.signal),
-    status: ({ rootPath, repositoryPaths }, context) => collectChanges(rootPath, repositoryPaths, context.signal),
-    diff: ({ rootPath, repositoryPath, path, layer }, context) => readDiff(rootPath, repositoryPath, path, layer, context.signal),
+    status: ({ rootPath, repositoryPaths, mergeBaseBranch }, context) => collectChanges(rootPath, repositoryPaths, context.signal, mergeBaseBranch),
+    diff: ({ rootPath, repositoryPath, path, layer, baseBranch }, context) => readDiff(rootPath, repositoryPath, path, layer, context.signal, baseBranch),
   },
 });

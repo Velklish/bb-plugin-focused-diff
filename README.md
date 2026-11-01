@@ -1,8 +1,10 @@
 # Focused Diff
 
-**Keep the changes in focus.** Current diffs from repositories touched by this thread, right above the BB composer.
+**Keep the changes in focus.** One change tracker for the current checkout and repositories touched by this thread, right above the BB composer.
 
-Working from a parent directory can hide changes in nested Git repositories. Focused Diff follows the repositories your thread actually modifies, gives you a compact file and line summary, and opens the native BB **Unified** or **Split** viewer when you select a file.
+Working from a parent directory can hide changes in nested Git repositories. Focused Diff groups their **Uncommitted** and **Committed** changes in one compact **Changes** card. The card starts collapsed whenever you open a thread. Inside, repositories start expanded and can be collapsed independently. Their state is saved in this browser per thread and repository, including across reloads. Selecting a file opens the native BB **Unified** or **Split** viewer.
+
+While the replacement has a successful snapshot, it hides the built-in Git summary in that composer, including the card around it. Parent-thread and pull-request controls remain visible and keep that card. Disabling the plugin, leaving its enabled Project, or losing the snapshot restores the built-in summary. The global **Show Git changes** setting is not changed. This does not replace the Git panel or timeline diffs.
 
 ## Install and enable
 
@@ -20,7 +22,7 @@ BB also registers the **Focused Diff** panel launcher globally. It may appear in
 
 ## Which repositories appear?
 
-Successful `fileChange` events identify the repositories automatically, including earlier events in the current thread. Reads, failed edits, and unrelated repositories are excluded. No recursive repository scan is performed. Tracking belongs to one thread and is filtered by its current environment.
+The current checkout is included without registration. Successful `fileChange` events identify additional repositories automatically, including earlier events in the current thread. Reads, failed edits, and unrelated nested repositories are excluded. No recursive repository scan is performed. Tracking belongs to one thread and is filtered by its current environment.
 
 Before modifying a repository through shell commands, the agent registers it once with `focused_diff_track_repository`. In an existing session without that tool, use:
 
@@ -34,15 +36,21 @@ Register repositories you modify, not read-only dependencies or temporary test f
 
 ## What the diff means
 
-The summary includes current **staged**, **unstaged**, and **untracked** changes in the selected repositories. A file in both staged and unstaged layers is counted once; line totals include both layers. Renames retain both paths, and Git worktrees are supported. A repository ignored by its parent still appears; its own `.gitignore` is respected.
+**Uncommitted** shows the net difference from HEAD to the working tree, including staged, unstaged, and untracked files. A file modified in both the index and working tree appears once. Changes cancelled between HEAD and the working file have no net diff. Unborn repositories use the current contents of staged new files. Renames retain both paths, and Git worktrees are supported. A repository ignored by its parent still appears; its own `.gitignore` is respected.
 
-This is repository-level scope, not line authorship. Your edits and another agent's edits in the same checkout are included. Committed changes disappear from the current diff; commit history is not tracked.
+**Committed** compares the branch HEAD with its merge base against the base branch. The current checkout follows BB's environment precedence: `mergeBaseBranch`, then `baseBranch`, then `defaultBranch`. Otherwise, each repository chooses the first available reference from `origin/HEAD`, `origin/main`, `origin/master`, `main`, and `master`. No fetch is performed. Without an available base, only Uncommitted appears; an invalid explicitly selected base shows a comparison error while keeping working changes visible.
+
+Totals count each path once per repository, including a path present in both sections. Line totals sum both sections. Section counts describe that section only. After a commit, changes leave Uncommitted and may appear in Committed until they are incorporated into the base branch.
+
+This is repository-level scope, not line authorship. Your edits and another agent's edits in the same checkout are included. The card shows current working and branch differences, not a commit-history list.
+
+Unresolved conflicts remain visible with a **Conflict** notice even when the working content matches HEAD. Staged deletions and renames with a recreated untracked source are reconciled into net file changes. These rare comparisons use a private temporary copy of the index, removed after reading. Git applies the repository's attributes and settings; index-write hooks are disabled for the temporary copy. The checkout and its real index are not written.
 
 The banner and open diff refresh every five seconds and pause periodic reads while the browser is hidden. **Refresh** updates immediately. Closing the UI stops its polling.
 
-The banner hides when there are no changed files. It keeps watching for new changes and reappears automatically. Git errors and pending history remain visible; binary files and renames can still appear with zero line counts.
+The card hides when there are no changed files or comparison errors. It keeps watching for new changes and reappears automatically. Git errors and pending history remain visible; binary files and renames can still appear with zero line counts. A failed status request or repository read restores the built-in summary as a fallback.
 
-Binary files show a notice. New text files above 512 KiB and patches above 2 MiB show size notices. Incomplete line totals are marked **partial**. A thread supports 128 registered repositories and each repository supports 2000 change entries. Git errors and exceeded limits are shown explicitly. Missing or replaced repository paths are rejected instead of falling back to the parent repository.
+Binary files show a notice. New text files above 512 KiB and patches above 2 MiB show size notices. Incomplete line totals are marked **partial**. A thread supports 128 registered repositories plus its current checkout, and each repository supports 2000 change entries across both sections. Git errors and exceeded limits are shown explicitly. Deleted registered paths silently disappear from the list on the next refresh. Replaced registered paths are reported as errors; the current checkout remains a separate entry.
 
 ## Develop
 

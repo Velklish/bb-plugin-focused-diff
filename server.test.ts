@@ -7,11 +7,11 @@ afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose
 function fileEvent(seq: number, path: string, status = "completed") {
   return { seq, type: "item/completed", data: { item: { type: "fileChange", status, changes: [{ path }] } } };
 }
-async function setup(events: Record<string, ReturnType<typeof fileEvent>[]> = {}) {
+async function setup(events: Record<string, ReturnType<typeof fileEvent>[]> = {}, branches: { mergeBaseBranch?: string | null; baseBranch?: string | null; defaultBranch?: string } = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
   const calls: { method: string; hostId: string; input: unknown }[] = [];
   const host = createFakePluginHost({ pluginId: "focused-diff", sdk: {
-    environments: { get: async () => ({ id: "env", hostId: "host", path: "/workspace" }) },
+    environments: { get: async () => ({ id: "env", hostId: "host", path: "/workspace", ...branches }) },
     threads: {
       get: async ({ threadId }) => makeThreadResponse({ id: threadId, projectId: threadId === "outside" ? "outside" : "selected", environmentId: "env" }),
       getPluginMetadata: async ({ threadId }) => metadata.get(threadId) ?? {},
@@ -59,10 +59,10 @@ describe("repositories modified by the current thread", () => {
     await harness.behavior.callRpc("status", { threadId: "one" });
     expect(calls.filter(call => call.method === "resolve")).toHaveLength(1);
   });
-  it("does not inspect Git repositories for a thread with no recorded work", async () => {
+  it("requests the current checkout even when the thread has no registered repositories", async () => {
     const { harness, calls } = await setup();
     expect(await harness.behavior.callRpc("status", { threadId: "empty" })).toEqual({ repositories: [], errors: [], trackedCount: 0, trackingPending: false });
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([{ method: "status", hostId: "host", input: { rootPath: "/workspace", repositoryPaths: [] } }]);
   });
   it("serializes concurrent explicit registrations without losing either repository", async () => {
     const { harness, metadata } = await setup();
@@ -75,7 +75,22 @@ describe("repositories modified by the current thread", () => {
   it("rejects a diff for a repository absent from this thread", async () => {
     const { harness, calls } = await setup();
     await expect(harness.behavior.callRpc("diff", { threadId: "one", repositoryPath: "/workspace/repos/other", path: "a.cs", layer: "unstaged" })).rejects.toThrow("not tracked");
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([{ method: "resolve", hostId: "host", input: { rootPath: "/workspace", paths: ["/workspace"] } }]);
+  });
+  it("allows a diff for the current checkout without registering it", async () => {
+    const { harness, calls, metadata } = await setup();
+    await harness.behavior.callRpc("diff", { threadId: "one", repositoryPath: "/workspace", path: "a.cs", layer: "committed", baseBranch: "main" });
+    expect(calls.at(-1)).toEqual({ method: "diff", hostId: "host", input: { rootPath: "/workspace", repositoryPath: "/workspace", path: "a.cs", layer: "committed", baseBranch: "main" } });
+    expect(metadata.size).toBe(0);
+  });
+  it.each([
+    [{ mergeBaseBranch: "chosen", baseBranch: "release", defaultBranch: "main" }, "chosen"],
+    [{ mergeBaseBranch: null, baseBranch: "release", defaultBranch: "main" }, "release"],
+    [{ mergeBaseBranch: null, baseBranch: null, defaultBranch: "trunk" }, "trunk"],
+  ])("uses BB's environment base-branch precedence: %j", async (branches, expected) => {
+    const { harness, calls } = await setup({}, branches);
+    await harness.behavior.callRpc("status", { threadId: "one" });
+    expect(calls.at(-1)).toMatchObject({ method: "status", input: { mergeBaseBranch: expected } });
   });
   it("tracks shell work through the agent tool and routes the diff to the environment host", async () => {
     const { harness, metadata, calls } = await setup();
