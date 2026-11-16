@@ -5,7 +5,7 @@
 - `server.ts`: thread metadata, completed file-change history, explicit registration tool and CLI, host routing.
 - `tracking.ts`: successful file-change path extraction, including rename destinations.
 - `host.ts`: typed RPC on the environment machine.
-- `git.ts`: current checkout resolution, net working-tree diffs, merge-base branch comparisons, and read-only status/diff calls for selected repositories.
+- `git.ts`: current checkout resolution, a private request-scoped Uncommitted module (`list()` / `diff(path)`) owning candidate reconciliation and selected-file evaluation, merge-base branch comparisons, and read-only status/diff calls for selected repositories. List counts remain batched; a selected patch does not evaluate unrelated candidates. Committed and legacy layers keep their existing contracts.
 - `contracts.ts`: shared wire schemas and limits.
 
 The plugin uses public Plugin SDK APIs only. Its Enabled Project setting gates Git reads, event tracking, tools and skills. It has no background repository scans or Git mutation commands.

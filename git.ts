@@ -10,7 +10,6 @@ const run = promisify(execFile);
 export const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 2000;
-type WorkingFile = ChangedFile & { recreated?: boolean; fromEmpty?: boolean };
 
 async function git(cwd: string, args: string[], signal?: AbortSignal, diffExit = false, maxBuffer = 4 * 1024 * 1024, env?: NodeJS.ProcessEnv) {
   try {
@@ -195,44 +194,82 @@ async function recreatedChange(repository: string, file: ChangedFile, head: stri
     throw cause;
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
-async function workingFiles(repository: string, signal?: AbortSignal) {
-  const [status, head] = await Promise.all([
-    git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal),
-    commitRef(repository, "HEAD", signal),
-  ]);
-  const files: WorkingFile[] = await comparisonFiles(repository, head ? [head] : ["--cached"], "uncommitted", signal);
-  const porcelain = statusFiles(status);
-  if (new Set([...files, ...porcelain].map(file => file.path)).size > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
-  if (!head) {
-    for (let i = files.length - 1; i >= 0; i--) {
-      try { Object.assign(files[i], await untrackedInfo(repository, files[i])); }
-      catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") files.splice(i, 1); else throw cause; }
+function uncommitted(repository: string, signal?: AbortSignal): { list(): Promise<ChangedFile[]>; diff(path: string): Promise<FileDiff> } {
+  type Candidate = { file: ChangedFile; comparison: "tracked" | "new" | "unborn" | "recreated" };
+
+  async function discover(withCounts: boolean) {
+    const [status, head] = await Promise.all([
+      git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal),
+      commitRef(repository, "HEAD", signal),
+    ]);
+    const refs = head ? [head] : ["--cached"];
+    const files = withCounts
+      ? await comparisonFiles(repository, refs, "uncommitted", signal)
+      : namedFiles(await git(repository, ["diff", ...diffOptions, "--name-status", "-z", ...refs], signal), "uncommitted");
+    const porcelain = statusFiles(status);
+    if (new Set([...files, ...porcelain].map(file => file.path)).size > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
+    const candidates: Candidate[] = files.map(file => ({ file, comparison: head ? "tracked" : "unborn" }));
+    for (const untracked of porcelain.filter(file => file.layer === "untracked")) {
+      const deletion = candidates.findIndex(({ file }) => file.path === untracked.path && file.status === "D");
+      const rename = candidates.find(({ file }) => file.oldPath === untracked.path && file.status === "R");
+      if (rename) {
+        Object.assign(rename.file, { oldPath: null, status: "A" });
+        rename.comparison = "new";
+      }
+      if (head && (deletion >= 0 || rename)) {
+        if (deletion >= 0) candidates.splice(deletion, 1);
+        candidates.push({ file: { ...untracked, layer: "uncommitted", status: "M" }, comparison: "recreated" });
+      } else candidates.push({ file: { ...untracked, layer: "uncommitted" }, comparison: "new" });
     }
-  }
-  for (const untracked of porcelain.filter(file => file.layer === "untracked")) {
-    const deletion = files.findIndex(file => file.path === untracked.path && file.status === "D");
-    const rename = files.find(file => file.oldPath === untracked.path && file.status === "R");
-    if (rename) {
-      Object.assign(rename, { oldPath: null, status: "A", fromEmpty: true }, await untrackedInfo(repository, rename));
+    for (const conflict of porcelain.filter(file => file.status.includes("U") || file.status === "AA" || file.status === "DD")) {
+      const existing = candidates.find(({ file }) => file.path === conflict.path);
+      if (existing) Object.assign(existing.file, { status: "U", notice: "Unresolved merge conflict." });
+      else candidates.push({ file: { ...conflict, layer: "uncommitted", status: "U", notice: "Unresolved merge conflict." }, comparison: "tracked" });
     }
-    if (head && (deletion >= 0 || rename)) {
-      if (deletion >= 0) files.splice(deletion, 1);
-      const recreated = { ...untracked, layer: "uncommitted" as const, status: "M", recreated: true };
-      const { patch, ...info } = await recreatedChange(repository, recreated, head, signal);
-      if (patch || info.notice) files.push({ ...recreated, ...info });
-    } else files.push({ ...untracked, layer: "uncommitted" });
+    return { candidates, head };
   }
-  for (const conflict of porcelain.filter(file => file.status.includes("U") || file.status === "AA" || file.status === "DD")) {
-    const existing = files.find(file => file.path === conflict.path);
-    if (existing) Object.assign(existing, { status: "U", notice: "Unresolved merge conflict." });
-    else files.push({ ...conflict, layer: "uncommitted", status: "U", notice: "Unresolved merge conflict." });
-  }
-  if (files.length > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
-  for (const file of files) {
+
+  async function evaluate({ file, comparison }: Candidate, head: string | null): Promise<{ file: ChangedFile; diff?: FileDiff } | null> {
     signal?.throwIfAborted();
-    if (file.status === "??") Object.assign(file, await untrackedInfo(repository, file));
+    if (comparison === "recreated") {
+      const { patch, ...info } = await recreatedChange(repository, file, head!, signal);
+      if (!patch && !info.notice) return null;
+      return { file: { ...file, ...info }, diff: { patch, notice: info.notice, binary: info.binary } };
+    }
+    if (comparison === "new" || comparison === "unborn") {
+      try {
+        const info = await untrackedInfo(repository, file);
+        return {
+          file: { ...file, ...info, notice: file.notice ?? info.notice },
+          ...(info.notice ? { diff: { patch: null, notice: info.notice, binary: info.binary } } : {}),
+        };
+      }
+      catch (cause) { if (comparison === "unborn" && (cause as NodeJS.ErrnoException).code === "ENOENT") return null; throw cause; }
+    }
+    return { file };
   }
-  return files;
+
+  return {
+    async list() {
+      const { candidates, head } = await discover(true), files: ChangedFile[] = [];
+      for (const candidate of candidates) {
+        const result = await evaluate(candidate, head);
+        if (result) files.push(result.file);
+      }
+      if (files.length > MAX_FILES) throw new Error(`Repository exceeds the limit of ${MAX_FILES} change entries.`);
+      return files;
+    },
+    async diff(path) {
+      const { candidates, head } = await discover(false);
+      const candidate = candidates.find(({ file }) => file.path === path);
+      if (!candidate) return missingChange();
+      const result = await evaluate(candidate, head);
+      if (!result) return missingChange();
+      if (result.diff) return result.diff;
+      const newFile = candidate.comparison === "new" || candidate.comparison === "unborn";
+      return filePatch(repository, result.file, head ? [head] : [], signal, newFile);
+    },
+  };
 }
 async function comparisonBase(repository: string, configured: string | null | undefined, signal?: AbortSignal) {
   if (configured) {
@@ -254,7 +291,7 @@ async function mergeBase(repository: string, base: string, signal?: AbortSignal)
   catch (cause) { if ((cause as { code?: number }).code === 1) throw new Error("The base branch and HEAD have no common ancestor."); throw cause; }
 }
 async function readRepository(repository: string, signal?: AbortSignal, configuredBase?: string | null): Promise<RepositoryChanges> {
-  const [files, branch, head] = await Promise.all([workingFiles(repository, signal), git(repository, ["branch", "--show-current"], signal), commitRef(repository, "HEAD", signal)]);
+  const [files, branch, head] = await Promise.all([uncommitted(repository, signal).list(), git(repository, ["branch", "--show-current"], signal), commitRef(repository, "HEAD", signal)]);
   let baseBranch: string | null = null, comparisonError: string | null = null;
   if (head) {
     try {
@@ -288,29 +325,29 @@ export async function collectChanges(rootPath: string, repositoryPaths: string[]
 export async function readDiff(rootPath: string, repositoryPath: string, path: string, layer: Layer, signal?: AbortSignal, baseBranch?: string): Promise<FileDiff> {
   if (isAbsolute(path) || path.split(/[\\/]/).some(part => part === ".." || part === ".git")) throw new Error("File path must stay inside the repository.");
   const repository = await registeredRepository(rootPath, repositoryPath, signal);
+  if (layer === "uncommitted") return uncommitted(repository, signal).diff(path);
   let refs: string[] = [];
-  let files: WorkingFile[];
+  let files: ChangedFile[];
   if (layer === "committed") {
     const base = await comparisonBase(repository, baseBranch, signal);
     if (!base) return { patch: null, notice: "No base branch is available.", binary: false };
     refs = [await mergeBase(repository, base.commit, signal), "HEAD"];
     files = await comparisonFiles(repository, refs, layer, signal);
-  } else if (layer === "uncommitted") {
-    files = await workingFiles(repository, signal);
-    const head = await commitRef(repository, "HEAD", signal);
-    if (head) refs = [head];
   } else files = statusFiles(await git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal));
   const file = files.find(file => file.path === path && file.layer === layer);
-  if (!file) return { patch: null, notice: "This change is no longer present. Refresh the list.", binary: false };
-  if (file.recreated) return recreatedChange(repository, file, refs[0], signal);
-  const newFile = layer === "untracked" || (layer === "uncommitted" && (file.status === "??" || file.fromEmpty || !refs.length));
+  if (!file) return missingChange();
+  const newFile = layer === "untracked";
   if (newFile) {
     const info = await untrackedInfo(repository, file);
     if (info.notice) return { patch: null, notice: info.notice, binary: info.binary };
   }
+  return filePatch(repository, file, layer === "staged" ? ["--cached"] : refs, signal, newFile);
+}
+function missingChange(): FileDiff { return { patch: null, notice: "This change is no longer present. Refresh the list.", binary: false }; }
+async function filePatch(repository: string, file: ChangedFile, refs: string[], signal?: AbortSignal, newFile = false): Promise<FileDiff> {
   const args = newFile
-    ? ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", process.platform === "win32" ? "NUL" : "/dev/null", path]
-    : ["diff", ...(layer === "staged" ? ["--cached"] : refs), ...diffOptions, "--", ...(file.oldPath ? [file.oldPath] : []), path];
+    ? ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", process.platform === "win32" ? "NUL" : "/dev/null", file.path]
+    : ["diff", ...refs, ...diffOptions, "--", ...(file.oldPath ? [file.oldPath] : []), file.path];
   try {
     const patch = await git(repository, args, signal, newFile, MAX_PATCH_BYTES);
     if (Buffer.byteLength(patch) > MAX_PATCH_BYTES) return { patch: null, notice: "Diff exceeds 2 MiB.", binary: false };

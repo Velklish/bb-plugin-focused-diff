@@ -1,12 +1,12 @@
 {
   "sdkMajor": 0,
-  "sdkVersion": "0.6.104",
+  "sdkVersion": "0.6.132",
   "artifactFormatVersion": 1,
   "pluginId": "focused-diff",
   "pluginVersion": "0.1.0",
   "builtWith": {
-    "bbVersion": "0.48.1",
-    "pluginSdkVersion": "0.6.104"
+    "bbVersion": "0.49.0",
+    "pluginSdkVersion": "0.6.132"
   },
-  "artifactDigest": "0dd0d9a20c30e708b20e3dcd715e7a3b7c3f0857e36cb5a320a2336d4dc9c40d"
+  "artifactDigest": "7de66ab929d4a7213efa2b0a8ca2162138913ebf8624e0343a953f79419b0f45"
 }

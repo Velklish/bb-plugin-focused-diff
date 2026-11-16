@@ -46,11 +46,15 @@ This is repository-level scope, not line authorship. Your edits and another agen
 
 Unresolved conflicts remain visible with a **Conflict** notice even when the working content matches HEAD. Staged deletions and renames with a recreated untracked source are reconciled into net file changes. These rare comparisons use a private temporary copy of the index, removed after reading. Git applies the repository's attributes and settings; index-write hooks are disabled for the temporary copy. The checkout and its real index are not written.
 
+Opening an Uncommitted patch evaluates only the selected candidate: the plugin does not read unrelated untracked-file contents or build private indexes for unrelated recreated files. Git still inspects the working tree to discover changes and renames; errors in that shared discovery can fail the request. The full list evaluates all candidates and keeps batched Git line counts. Neither operation caches state between requests.
+
 The banner and open diff refresh every five seconds and pause periodic reads while the browser is hidden. **Refresh** updates immediately. Closing the UI stops its polling.
 
 The card hides when there are no changed files or comparison errors. It keeps watching for new changes and reappears automatically. Git errors and pending history remain visible; binary files and renames can still appear with zero line counts. A failed status request or repository read restores the built-in summary as a fallback.
 
 Binary files show a notice. New text files above 512 KiB and patches above 2 MiB show size notices. Incomplete line totals are marked **partial**. A thread supports 128 registered repositories plus its current checkout, and each repository supports 2000 change entries across both sections. Git errors and exceeded limits are shown explicitly. Deleted registered paths silently disappear from the list on the next refresh. Replaced registered paths are reported as errors; the current checkout remains a separate entry.
+
+The 2000-candidate limit applies during discovery, including when opening one Uncommitted patch, before the plugin reads candidate contents. The separate 2000-result limit applies to the complete list across Uncommitted and Committed; a path in both sections counts as two entries for this limit.
 
 ## Develop
 
