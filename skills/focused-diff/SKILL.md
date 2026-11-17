@@ -11,6 +11,6 @@ Register only repositories you modify. Do not register repositories you merely r
 
 Use `bb focused-diff status --json` to inspect current changes. It includes the current checkout without registration and additional repositories registered by this thread. `uncommitted` entries show net HEAD-to-working-tree changes, including untracked files. `committed` entries show branch changes from the merge base against `baseBranch`. Each repository reports its own branch and comparison error, if any. This view does not determine line authorship.
 
-The Changes card groups both sections by repository and replaces the native Git summary in that composer while a successful snapshot is available. It restores the native summary on failure or plugin disable without changing the global Show Git changes setting.
+The Changes card groups linked worktrees under their shared Git repository. When several checkouts have changes, each branch header collapses its own diff sections and shows the checkout totals. The card replaces the native Git summary in that composer while a successful snapshot is available, and restores it on failure or plugin disable without changing the global Show Git changes setting.
 
 The plugin must be enabled for the thread's Project in Settings → Installed plugins → Focused Diff → Enabled Project. Other Projects are excluded from tracking and Git reads.

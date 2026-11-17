@@ -105,30 +105,77 @@ function ChangeSection({ repository, files, layer }: { repository: RepositoryCha
     </div>
   </section>;
 }
-function RepositoryGroup({ repository, threadId }: { repository: RepositoryChanges; threadId: string }) {
+function pathName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path; }
+
+function CheckoutGroup({ checkout, threadId, repositoryPath, showHeader }: { checkout: RepositoryChanges; threadId: string; repositoryPath: string; showHeader: boolean }) {
   const pluginId = experimental_usePluginId();
-  const storageKey = JSON.stringify([pluginId, "repository-expanded", threadId, repository.path]);
+  const storageKey = JSON.stringify([pluginId, "checkout-expanded", threadId, checkout.path]);
   const [expanded, setExpanded] = useState(() => {
     try { return window.localStorage.getItem(storageKey) !== "false"; } catch { return true; }
   });
   const toggle = () => {
     const next = !expanded;
     setExpanded(next);
+    try { window.localStorage.setItem(storageKey, String(next)); } catch { /* Disclosure still works without storage. */ }
+  };
+  const id = useId();
+  const name = pathName(checkout.path);
+  const showName = checkout.path !== repositoryPath && name !== checkout.branch;
+  const tally = expanded ? null : totals([checkout]);
+  return <section className="min-w-0">
+    {showHeader ? <button type="button" className="flex min-h-7 w-full min-w-0 items-center gap-1.5 rounded px-2 py-1 text-left text-xs hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" title={`${checkout.branch}\n${checkout.path}`} aria-expanded={expanded} aria-controls={id} aria-label={`${expanded ? "Collapse" : "Expand"} checkout ${checkout.label}`} onClick={toggle}>
+      <Icon name={expanded ? "ChevronDown" : "ChevronRight"} className="size-3 shrink-0 text-muted-foreground" />
+      <Icon name="GitBranch" className="size-3 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 truncate font-medium">{checkout.branch}</span>
+      {showName ? <span className="min-w-0 truncate text-muted-foreground"><span aria-hidden="true">· </span>{name}</span> : null}
+      {tally ? <>
+        <span className="ml-auto shrink-0 text-muted-foreground">{tally.files} file{tally.files === 1 ? "" : "s"}</span>
+        <Tally {...tally} />
+      </> : null}
+    </button> : null}
+    <div id={id} hidden={showHeader && !expanded} className={showHeader ? "ml-3 space-y-1 border-l border-border pl-2" : "space-y-1"}>
+      <ChangeSection repository={checkout} files={checkout.files.filter(file => file.layer !== "committed")} layer="uncommitted" />
+      <ChangeSection repository={checkout} files={checkout.files.filter(file => file.layer === "committed")} layer="committed" />
+      {checkout.comparisonError ? <p role="alert" className="px-2 py-1 text-xs text-destructive">{checkout.comparisonError}</p> : null}
+    </div>
+  </section>;
+}
+
+function RepositoryGroup({ checkouts, threadId }: { checkouts: RepositoryChanges[]; threadId: string }) {
+  const first = checkouts[0];
+  const commonDir = first.commonDir;
+  const repositoryPath = commonDir?.replace(/[\\/]\.git$/, "") ?? first.path;
+  const folderName = pathName(repositoryPath);
+  const name = commonDir === repositoryPath ? folderName.replace(/\.git$/, "") : folderName;
+  const label = checkouts.find(checkout => checkout.path === repositoryPath)?.label ?? name;
+  const singleCheckout = checkouts.length === 1;
+  const pluginId = experimental_usePluginId();
+  const legacyKey = JSON.stringify([pluginId, "repository-expanded", threadId, repositoryPath]);
+  const checkoutKey = JSON.stringify([pluginId, "repository-expanded", threadId, first.path]);
+  const storageKey = commonDir ? JSON.stringify([pluginId, "repository-group-expanded", threadId, commonDir]) : legacyKey;
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(storageKey) ?? window.localStorage.getItem(legacyKey);
+      return (stored ?? (singleCheckout ? window.localStorage.getItem(checkoutKey) : null)) !== "false";
+    }
+    catch { return true; }
+  });
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
     try { window.localStorage.setItem(storageKey, String(next)); } catch { /* Keep disclosure usable when browser storage is unavailable. */ }
   };
-  const tally = totals([repository]);
+  const tally = totals(checkouts);
   const id = useId();
-  const name = repository.path.split(/[\\/]/).filter(Boolean).at(-1) || repository.label;
   return <section className="min-w-0 border-t border-border">
-    <button type="button" className="flex min-h-9 w-full min-w-0 items-center gap-1.5 px-3 py-2 text-left text-xs hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" title={repository.path} aria-expanded={expanded} aria-controls={id} aria-label={`${expanded ? "Collapse" : "Expand"} repository ${repository.label}`} onClick={toggle}>
+    <button type="button" className="flex min-h-9 w-full min-w-0 items-center gap-1.5 px-3 py-2 text-left text-xs hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" title={singleCheckout ? first.path : commonDir} aria-expanded={expanded} aria-controls={id} aria-label={`${expanded ? "Collapse" : "Expand"} repository ${label}`} onClick={toggle}>
       <Icon name={expanded ? "ChevronDown" : "ChevronRight"} className="size-3 shrink-0 text-muted-foreground" /><Icon name="Folder" className="size-3.5 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 truncate font-medium">{name}</span><span className="hidden min-w-0 items-center gap-1 truncate text-muted-foreground sm:flex"><Icon name="GitBranch" className="size-3 shrink-0" /><span className="truncate">{repository.branch}</span></span>
+      <span className="min-w-0 truncate font-medium">{name}</span>
+      {singleCheckout ? <span className="flex min-w-0 items-center gap-1 truncate text-muted-foreground"><Icon name="GitBranch" className="size-3 shrink-0" /><span className="truncate">{first.branch}</span></span> : null}
       <span className="ml-auto shrink-0 text-muted-foreground">{tally.files} file{tally.files === 1 ? "" : "s"}</span><Tally {...tally} />
     </button>
-    <div id={id} hidden={!expanded} className="min-w-0 space-y-1 pb-2 pl-5 pr-2">
-      <ChangeSection repository={repository} files={repository.files.filter(file => file.layer !== "committed")} layer="uncommitted" />
-      <ChangeSection repository={repository} files={repository.files.filter(file => file.layer === "committed")} layer="committed" />
-      {repository.comparisonError ? <p role="alert" className="px-2 py-1 text-xs text-destructive">{repository.comparisonError}</p> : null}
+    <div id={id} hidden={!expanded} className="min-w-0 space-y-2 pb-2 pl-5 pr-2">
+      {checkouts.map(checkout => <CheckoutGroup key={checkout.path} checkout={checkout} threadId={threadId} repositoryPath={repositoryPath} showHeader={!singleCheckout} />)}
     </div>
   </section>;
 }
@@ -140,13 +187,19 @@ function EnabledChangesBanner() {
   const { data, error, refetch } = usePolling<Snapshot>(load);
   const [expanded, setExpanded] = useState(false);
   const repositories = data?.repositories ?? [], tally = totals(repositories);
+  const groups = new Map<string, RepositoryChanges[]>();
+  for (const checkout of repositories) {
+    const key = checkout.commonDir ?? checkout.path;
+    const group = groups.get(key);
+    if (group) group.push(checkout); else groups.set(key, [checkout]);
+  }
   if (tally.files === 0 && !repositories.some(repo => repo.comparisonError) && !data?.trackingPending && !error && !data?.errors.length) return null;
   return <div data-focused-diff-replacement={data && !error && !data.errors.length ? "" : undefined} className="min-w-0 overflow-hidden rounded-lg border border-border bg-surface-raised-solid">
     <div className="flex min-h-9 items-center gap-1 pr-1">
       <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-left text-xs hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" aria-expanded={expanded} aria-controls={`focused-diff-${threadId}`} onClick={() => setExpanded(value => !value)}>
         <Icon name="FileDiff" className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="font-medium">Changes</span>
-        <span className="min-w-0 truncate text-muted-foreground">· {repositories.length} repo{repositories.length === 1 ? "" : "s"}, {tally.files} file{tally.files === 1 ? "" : "s"},</span>
+        <span className="min-w-0 truncate text-muted-foreground">· {groups.size} repo{groups.size === 1 ? "" : "s"}, {tally.files} file{tally.files === 1 ? "" : "s"},</span>
         <Tally {...tally} />
         {repositories.some(repo => repo.files.some(file => file.notice && !file.binary)) ? <span className="text-xs text-muted-foreground">partial</span> : null}
         <Icon name={expanded ? "ChevronUp" : "ChevronDown"} className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
@@ -158,7 +211,7 @@ function EnabledChangesBanner() {
     {data?.errors.map((message, index) => <p key={index} role="alert" className="px-4 pb-2 text-sm text-destructive">{message}</p>)}
     <div id={`focused-diff-${threadId}`} hidden={!expanded} className="max-h-96 overflow-y-auto">
       {repositories.length === 0 ? <p className="px-2 py-2 text-sm text-muted-foreground">No uncommitted changes in this thread's tracked repositories.</p> : null}
-      {repositories.map(repository => <RepositoryGroup key={repository.path} repository={repository} threadId={threadId} />)}
+      {[...groups].map(([key, checkouts]) => <RepositoryGroup key={key} checkouts={checkouts} threadId={threadId} />)}
     </div>
   </div>;
 }

@@ -113,6 +113,64 @@ it("collapses repositories independently and retains section state through outer
   expect(committed.getAttribute("aria-expanded")).toBe("false");
   expect(slot.queryByRole("button", { name: "Open Committed diff for repos/cargo/Cargo.cs" })).toBeNull();
 });
+it("groups linked checkouts, keeps a separate clone, and opens each checkout's diff", async () => {
+  const main = { ...repository, commonDir: "/workspace/repos/cargo/.git", branch: "main" };
+  const worker = { ...main, path: "/workspace/sandbox/worker", label: "sandbox/worker", branch: "feature", baseBranch: "main" };
+  const clone = { ...main, path: "/workspace/clones/cargo", label: "clones/cargo", commonDir: "/workspace/clones/cargo/.git", branch: "release" };
+  const slot = await banner(() => ({ ...snapshot(), repositories: [clone, main, worker] }));
+  await slot.findByText("Changes");
+  expect(slot.getByText("· 2 repos, 3 files,")).toBeTruthy();
+  fireEvent.click(slot.getByRole("button", { name: /^Changes/ }));
+  expect(slot.getAllByRole("button", { name: /^Collapse repository/ })).toHaveLength(2);
+  expect(slot.getByText("worker")).toBeTruthy();
+  fireEvent.click(slot.getByRole("button", { name: "Open Committed diff for sandbox/worker/Cargo.cs" }));
+  expect(slot.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "diff", title: "Cargo.cs", params: { repositoryPath: worker.path, label: worker.label, path: "Cargo.cs", layer: "committed", baseBranch: "main" } } });
+});
+it("collapses a checkout independently and restores its disclosure after remount", async () => {
+  const main = { ...repository, commonDir: "/workspace/repos/cargo/.git", branch: "main" };
+  const worker = { ...main, path: "/workspace/sandbox/worker", label: "sandbox/worker", branch: "worker" };
+  const status = () => ({ ...snapshot(), repositories: [main, worker] });
+  const slot = await banner(status);
+  await slot.findByText("Changes");
+  fireEvent.click(slot.getByRole("button", { name: /^Changes/ }));
+  expect(slot.getAllByText("cargo")).toHaveLength(1);
+  expect(slot.getAllByText("worker")).toHaveLength(1);
+
+  fireEvent.click(slot.getAllByRole("button", { name: /^Committed/ })[1]);
+  fireEvent.click(slot.getByRole("button", { name: "Collapse checkout sandbox/worker" }));
+  const collapsed = slot.getByRole("button", { name: "Expand checkout sandbox/worker" });
+  expect(collapsed.textContent).toContain("1 file");
+  expect(slot.queryByRole("button", { name: "Open Uncommitted diff for sandbox/worker/Cargo.cs" })).toBeNull();
+  expect(slot.getByRole("button", { name: "Open Uncommitted diff for repos/cargo/Cargo.cs" })).toBeTruthy();
+  fireEvent.click(collapsed);
+  expect(slot.queryByRole("button", { name: "Open Committed diff for sandbox/worker/Cargo.cs" })).toBeNull();
+  fireEvent.click(slot.getByRole("button", { name: "Collapse checkout sandbox/worker" }));
+  slot.lifecycle.unmount();
+
+  const reloaded = await banner(status);
+  await reloaded.findByText("Changes");
+  fireEvent.click(reloaded.getByRole("button", { name: /^Changes/ }));
+  expect(reloaded.getByRole("button", { name: "Expand checkout sandbox/worker" })).toBeTruthy();
+  expect(reloaded.getByRole("button", { name: "Collapse checkout repos/cargo" })).toBeTruthy();
+});
+it("shows the repository name and the checkout branch when only a linked checkout has changes", async () => {
+  const worker = { ...repository, path: "/workspace/sandbox/worker", label: "sandbox/worker", commonDir: "/workspace/repos/cargo/.git" };
+  const slot = await banner(() => ({ ...snapshot(), repositories: [worker] }));
+  await slot.findByText("Changes");
+  fireEvent.click(slot.getByRole("button", { name: /^Changes/ }));
+  expect(slot.getByText("cargo")).toBeTruthy();
+  expect(slot.getByText("feature")).toBeTruthy();
+  expect(slot.queryByText("worker")).toBeNull();
+  expect(slot.getByRole("button", { name: "Open Uncommitted diff for sandbox/worker/Cargo.cs" })).toBeTruthy();
+});
+it.each([repository.path, "/workspace/sandbox/worker"])("retains the old checkout disclosure preference from %s", async path => {
+  window.localStorage.setItem(JSON.stringify(["focused-diff", "repository-expanded", "one", path]), "false");
+  const worker = { ...repository, path: "/workspace/sandbox/worker", label: "sandbox/worker", commonDir: "/workspace/repos/cargo/.git" };
+  const slot = await banner(() => ({ ...snapshot(), repositories: [worker] }));
+  await slot.findByText("Changes");
+  fireEvent.click(slot.getByRole("button", { name: /^Changes/ }));
+  expect(slot.getByRole("button", { name: "Expand repository cargo" })).toBeTruthy();
+});
 it("withdraws the replacement marker on a failed refresh so native Git remains available", async () => {
   let failure = false;
   const slot = await banner(() => { if (failure) throw new Error("Offline"); return snapshot(); });

@@ -4,6 +4,8 @@
 
 Working from a parent directory can hide changes in nested Git repositories. Focused Diff groups their **Uncommitted** and **Committed** changes in one compact **Changes** card. The card starts collapsed whenever you open a thread. Inside, repositories start expanded and can be collapsed independently. Their state is saved in this browser per thread and repository, including across reloads. Selecting a file opens the native BB **Unified** or **Split** viewer.
 
+Checkouts that share a Git common directory appear in one repository group. If multiple checkouts have changes, each can be collapsed by its branch header. Collapsed checkouts show their file and line totals, and their disclosure state is saved per thread and checkout. One changed checkout shows its branch and files directly under the repository. Independent clones have separate groups even when they share a remote.
+
 While the replacement has a successful snapshot, it hides the built-in Git summary in that composer, including the card around it. Parent-thread and pull-request controls remain visible and keep that card. Disabling the plugin, leaving its enabled Project, or losing the snapshot restores the built-in summary. The global **Show Git changes** setting is not changed. This does not replace the Git panel or timeline diffs.
 
 ## Install and enable
@@ -34,13 +36,15 @@ bb focused-diff track --thread thr_example --path /projects/sample-app --json
 
 Register repositories you modify, not read-only dependencies or temporary test fixtures. Commands reject registration and diff access outside the enabled Project. Registration changes thread metadata, not Git files or the index.
 
+`status --json` returns one entry per changed checkout in `repositories`, with its path and Git `commonDir`. The card uses `commonDir` to group the entries.
+
 ## What the diff means
 
 **Uncommitted** shows the net difference from HEAD to the working tree, including staged, unstaged, and untracked files. A file modified in both the index and working tree appears once. Changes cancelled between HEAD and the working file have no net diff. Unborn repositories use the current contents of staged new files. Renames retain both paths, and Git worktrees are supported. A repository ignored by its parent still appears; its own `.gitignore` is respected.
 
 **Committed** compares the branch HEAD with its merge base against the base branch. The current checkout follows BB's environment precedence: `mergeBaseBranch`, then `baseBranch`, then `defaultBranch`. Otherwise, each repository chooses the first available reference from `origin/HEAD`, `origin/main`, `origin/master`, `main`, and `master`. No fetch is performed. Without an available base, only Uncommitted appears; an invalid explicitly selected base shows a comparison error while keeping working changes visible.
 
-Totals count each path once per repository, including a path present in both sections. Line totals sum both sections. Section counts describe that section only. After a commit, changes leave Uncommitted and may appear in Committed until they are incorporated into the base branch.
+Totals count each path once per checkout, including a path present in both sections. Line totals sum both sections. Section counts describe that section only. After a commit, changes leave Uncommitted and may appear in Committed until they are incorporated into the base branch.
 
 This is repository-level scope, not line authorship. Your edits and another agent's edits in the same checkout are included. The card shows current working and branch differences, not a commit-history list.
 

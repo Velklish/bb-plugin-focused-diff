@@ -95,7 +95,16 @@ describe("thread-scoped Git changes", () => {
     await writeFile(join(worktree, "file.txt"), "changed\n");
     const result = await resolveRepositories(root, [join(worktree, "deleted", "nested", "file.txt"), join(worktree, "file.txt"), "/etc/hosts"]);
     expect(result).toEqual({ repositories: [await realpath(worktree)], errors: [] });
-    expect((await collectChanges(root, result.repositories)).repositories[0]).toMatchObject({ branch: "feature", label: "sandbox/cargo-worktree" });
+    expect((await collectChanges(root, result.repositories)).repositories[0]).toMatchObject({ branch: "feature", label: "sandbox/cargo-worktree", commonDir: join(await realpath(repo), ".git") });
+  });
+  it.skipIf(process.platform === "win32").each(["cargo ", "cargo\r", "cargo\nfeature"])("preserves whitespace in checkout directory %j", async name => {
+    const root = await workspace();
+    const repo = join(root, name);
+    await repository(repo);
+    await writeFile(join(repo, "file.txt"), "changed\n");
+    const result = await collectChanges(repo, []);
+    expect(result.errors).toEqual([]);
+    expect(result.repositories[0]).toMatchObject({ path: await realpath(repo), commonDir: join(await realpath(repo), ".git") });
   });
   it("preserves filenames, detects renames and respects the repository's own ignore rules", async () => {
     const root = await workspace(), repo = join(root, "external", "personal");

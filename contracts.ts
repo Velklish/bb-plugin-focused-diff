@@ -11,6 +11,7 @@ export const fileSchema = z.object({
 });
 export const repositorySchema = z.object({
   path: pathSchema, label: z.string(), branch: z.string(), files: z.array(fileSchema).max(2000),
+  commonDir: pathSchema.optional(),
   baseBranch: baseBranchSchema.nullable().default(null), comparisonError: z.string().nullable().default(null),
 });
 export const snapshotSchema = z.object({

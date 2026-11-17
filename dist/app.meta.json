@@ -14,7 +14,6 @@
     "jsxRuntime",
     "pluginSdkApp",
     "react",
-    "tailwindMerge",
-    "zod"
+    "tailwindMerge"
   ]
 }

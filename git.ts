@@ -40,18 +40,22 @@ async function existingDirectory(path: string) {
     }
   }
 }
-async function scopeRoot(rootPath: string, signal?: AbortSignal) {
+async function gitPath(cwd: string, option: "--show-toplevel" | "--git-common-dir", signal?: AbortSignal) {
+  const path = await git(cwd, ["rev-parse", "--path-format=absolute", option], signal);
+  return realpath(path.replace(process.platform === "win32" ? /\r?\n$/ : /\n$/, ""));
+}
+async function repositoryScope(rootPath: string, signal?: AbortSignal) {
   if (!isAbsolute(rootPath)) throw new Error("Environment path must be absolute.");
-  const root = await realpath(rootPath);
-  try { return await realpath((await git(root, ["rev-parse", "--show-toplevel"], signal)).trim()); }
+  const environment = await realpath(rootPath);
+  try { return { environment, checkout: await gitPath(environment, "--show-toplevel", signal) }; }
   catch (cause) {
     if (signal?.aborted || (cause as { code?: number }).code !== 128) throw cause;
-    return root;
+    return { environment, checkout: null };
   }
 }
 export async function resolveRepositories(rootPath: string, paths: string[], signal?: AbortSignal) {
-  const root = await scopeRoot(rootPath, signal);
-  const environment = await realpath(rootPath);
+  const { environment, checkout } = await repositoryScope(rootPath, signal);
+  const root = checkout ?? environment;
   const repositories = new Set<string>();
   const errors: string[] = [];
   for (const path of paths) {
@@ -61,7 +65,7 @@ export async function resolveRepositories(rootPath: string, paths: string[], sig
     try {
       const directory = await existingDirectory(absolute);
       if (!inside(root, directory)) continue;
-      const repository = await realpath((await git(directory, ["rev-parse", "--show-toplevel"], signal)).trim());
+      const repository = await gitPath(directory, "--show-toplevel", signal);
       if (inside(root, repository)) repositories.add(repository);
     } catch (cause) {
       if (signal?.aborted) throw cause;
@@ -73,15 +77,19 @@ export async function resolveRepositories(rootPath: string, paths: string[], sig
 }
 function message(cause: unknown) { return (cause instanceof Error ? cause.message : String(cause)).slice(0, 1000); }
 
-async function registeredRepository(rootPath: string, repositoryPath: string, signal?: AbortSignal) {
+async function registeredRepository(rootPath: string, repositoryPath: string, signal?: AbortSignal, scope?: Awaited<ReturnType<typeof repositoryScope>>) {
   if (!isAbsolute(repositoryPath)) throw new Error("Registered repository path must be absolute.");
-  const environment = await realpath(rootPath), lexical = resolve(repositoryPath);
+  const { environment, checkout } = scope ?? await repositoryScope(rootPath, signal);
+  const lexical = resolve(repositoryPath);
   const expected = inside(rootPath, lexical) ? resolve(environment, relative(rootPath, lexical)) : lexical;
   const canonical = await realpath(repositoryPath);
   if (canonical !== expected) throw new Error("Tracked repository path now resolves to a different location.");
-  const { repositories } = await resolveRepositories(rootPath, [canonical], signal);
-  if (!repositories.includes(canonical)) throw new Error("Tracked path is no longer a Git repository inside this environment.");
-  return canonical;
+  try {
+    if (inside(checkout ?? environment, canonical) && await gitPath(canonical, "--show-toplevel", signal) === canonical) return canonical;
+  } catch (cause) {
+    if (signal?.aborted) throw cause;
+  }
+  throw new Error("Tracked path is no longer a Git repository inside this environment.");
 }
 
 function statusFiles(raw: string): ChangedFile[] {
@@ -306,14 +314,18 @@ async function readRepository(repository: string, signal?: AbortSignal, configur
   return { path: repository, label: repository, branch: branch.trim() || "detached HEAD", files, baseBranch, comparisonError };
 }
 export async function collectChanges(rootPath: string, repositoryPaths: string[], signal?: AbortSignal, mergeBaseBranch?: string | null) {
-  const root = await scopeRoot(rootPath, signal);
-  const current = await resolveRepositories(rootPath, [rootPath], signal);
-  const repositories: RepositoryChanges[] = [], errors: string[] = [...current.errors];
-  for (const requested of [...new Set([...current.repositories, ...repositoryPaths])].sort()) {
+  const scope = await repositoryScope(rootPath, signal);
+  const root = scope.checkout ?? scope.environment;
+  const repositories: RepositoryChanges[] = [], errors: string[] = [];
+  const paths = scope.checkout ? [scope.checkout, ...repositoryPaths] : repositoryPaths;
+  for (const requested of [...new Set(paths)].sort()) {
     try {
-      const path = await registeredRepository(rootPath, requested, signal);
-      const repository = await readRepository(path, signal, current.repositories.includes(path) ? mergeBaseBranch : undefined);
-      if (repository.files.length || repository.comparisonError) repositories.push({ ...repository, label: relative(root, path) || basename(path) });
+      const path = await registeredRepository(rootPath, requested, signal, scope);
+      const repository = await readRepository(path, signal, path === scope.checkout ? mergeBaseBranch : undefined);
+      if (repository.files.length || repository.comparisonError) {
+        const commonDir = await gitPath(path, "--git-common-dir", signal);
+        repositories.push({ ...repository, commonDir, label: relative(root, path) || basename(path) });
+      }
     } catch (cause) {
       if (signal?.aborted) throw cause;
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
