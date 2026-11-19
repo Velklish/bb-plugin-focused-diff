@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { definePluginApp, experimental_Diff as Diff, experimental_usePluginId, useBbNavigate, useComposer, useRealtime, useRpc, useSettings, useBbContext } from "@get-bb/plugin-sdk/app";
+import { definePluginApp, experimental_Diff as Diff, experimental_useAppPanel, experimental_usePluginId, useComposer, useRealtime, useRpc, useSettings, useBbContext } from "@get-bb/plugin-sdk/app";
 import { z } from "zod";
 import type { ChangedFile, FileDiff, RepositoryChanges, Snapshot, rpcContract } from "./contracts";
 import { Button } from "./components/ui/button";
@@ -83,7 +83,7 @@ function ChangesBanner() {
 }
 function ChangeSection({ repository, files, layer }: { repository: RepositoryChanges; files: ChangedFile[]; layer: "uncommitted" | "committed" }) {
   const [expanded, setExpanded] = useState(true);
-  const navigate = useBbNavigate();
+  const panel = experimental_useAppPanel();
   const id = useId();
   if (!files.length) return null;
   const tally = totals([{ ...repository, files }]), title = layer === "committed" ? "Committed" : "Uncommitted";
@@ -96,7 +96,7 @@ function ChangeSection({ repository, files, layer }: { repository: RepositoryCha
     </button>
     <div id={id} hidden={!expanded} className="max-h-32 overflow-y-auto py-0.5">
       {files.map(file => <button type="button" key={file.path} className="flex min-h-6 w-full min-w-0 items-center gap-2 rounded px-2 py-0.5 text-left text-xs hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path} aria-label={`Open ${title} diff for ${repository.label}/${file.path}`} onClick={() => {
-        navigate.openThreadPanel({ actionId: "diff", title: file.path, params: { repositoryPath: repository.path, label: repository.label, path: file.path, layer, ...(layer === "committed" && repository.baseBranch ? { baseBranch: repository.baseBranch } : {}) } });
+        panel.openTab({ tab: diffTab, title: file.path, params: { repositoryPath: repository.path, label: repository.label, path: file.path, layer, ...(layer === "committed" && repository.baseBranch ? { baseBranch: repository.baseBranch } : {}) } });
       }}>
         <span className="w-4 shrink-0 text-center text-muted-foreground">{file.status === "??" ? "A?" : file.status.trim()}</span>
         <span className="min-w-0 flex-1 truncate">{file.oldPath ? `${file.oldPath} → ` : ""}{file.path}</span>
@@ -105,6 +105,7 @@ function ChangeSection({ repository, files, layer }: { repository: RepositoryCha
     </div>
   </section>;
 }
+const diffTab = { id: "diff", context: { kind: "thread" }, availability: "action" } as const;
 function pathName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path; }
 
 function CheckoutGroup({ checkout, threadId, repositoryPath, showHeader }: { checkout: RepositoryChanges; threadId: string; repositoryPath: string; showHeader: boolean }) {
@@ -245,5 +246,5 @@ function DiffPanel({ threadId, params }: { threadId: string; params: unknown }) 
 export default definePluginApp(app => {
   app.contentScripts.register({ id: "native-tracker", mount: mountNativeTracker });
   app.composer.customize({ id: "focused-diff", scopes: ["thread"], banners: [{ id: "changes", chrome: "bare", component: ChangesBanner }] });
-  app.slots.threadPanelAction({ id: "diff", title: "Focused Diff", icon: "Code", layout: "flush", component: DiffPanel });
+  app.slots.experimental_tab({ ...diffTab, title: "Focused Diff", icon: "Code", layout: "flush", component: DiffPanel });
 });

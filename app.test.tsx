@@ -1,11 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, waitFor } from "@testing-library/react";
+import type { ComponentType } from "react";
+import type { ExperimentalThreadActionTabProps } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import app, { totals } from "./app";
 import type { ChangedFile, RepositoryChanges, Snapshot } from "./contracts";
 
 const cleanup: (() => void)[] = [];
+const diffTab = { id: "diff", context: { kind: "thread" }, availability: "action" };
+function diffPanel(loaded: Awaited<ReturnType<typeof loadPluginApp>>) {
+  const tab = loaded.tabs.find(registration => registration.id === diffTab.id);
+  if (!tab || tab.context.kind !== "thread" || tab.availability !== "action") throw new Error("The diff tab is not registered as a thread action.");
+  return { component: tab.component as ComponentType<ExperimentalThreadActionTabProps> };
+}
 beforeEach(() => {
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } });
@@ -32,7 +40,7 @@ it("does not poll status or diff in a different project, including a restored pa
   const loaded = await loadPluginApp(app);
   const options = { settings: { project: "selected" }, composer: { scope: { kind: "thread" as const, threadId: "outside" } }, rpc: { scope: () => ({ enabled: false }) } };
   const bannerSlot = renderSlot(loaded.composerCustomizations[0].banners![0], {}, options);
-  const panelSlot = renderSlot(loaded.threadPanelActions[0], { threadId: "outside", params: { repositoryPath: repository.path, label: repository.label, path: "Cargo.cs", layer: "unstaged" } }, options);
+  const panelSlot = renderSlot(diffPanel(loaded), { threadId: "outside", environment: null, params: { repositoryPath: repository.path, label: repository.label, path: "Cargo.cs", layer: "unstaged" } }, options);
   cleanup.push(() => { bannerSlot.lifecycle.unmount(); panelSlot.lifecycle.unmount(); });
   await waitFor(() => expect(panelSlot.inspection.rpcCalls.length).toBe(1));
   expect(bannerSlot.queryByText("Changes")).toBeNull();
@@ -51,9 +59,9 @@ it("counts one path across sections once and opens both kinds of diff in the sel
   expect(slot.getByText("cargo")).toBeTruthy();
   expect(slot.getByText("feature")).toBeTruthy();
   fireEvent.click(slot.getByRole("button", { name: "Open Uncommitted diff for repos/cargo/Cargo.cs" }));
-  expect(slot.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "diff", title: "Cargo.cs", params: { repositoryPath: "/workspace/repos/cargo", label: "repos/cargo", path: "Cargo.cs", layer: "uncommitted" } } });
+  expect(slot.inspection.experimental_panelCalls).toContainEqual({ method: "openTab", options: { tab: diffTab, title: "Cargo.cs", params: { repositoryPath: "/workspace/repos/cargo", label: "repos/cargo", path: "Cargo.cs", layer: "uncommitted" } } });
   fireEvent.click(slot.getByRole("button", { name: "Open Committed diff for repos/cargo/Cargo.cs" }));
-  expect(slot.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "diff", title: "Cargo.cs", params: { repositoryPath: repository.path, label: repository.label, path: "Cargo.cs", layer: "committed", baseBranch: "origin/main" } } });
+  expect(slot.inspection.experimental_panelCalls).toContainEqual({ method: "openTab", options: { tab: diffTab, title: "Cargo.cs", params: { repositoryPath: repository.path, label: repository.label, path: "Cargo.cs", layer: "committed", baseBranch: "origin/main" } } });
   expect(slot.inspection.rpcCalls.find(call => call.method === "status")).toMatchObject({ method: "status", input: { threadId: "one" } });
 });
 it.each([0, 2])("keeps the banner hidden without changes, with %i tracked repositories", async trackedCount => {
@@ -86,7 +94,7 @@ it("keeps zero-line file changes, Git errors, and pending history visible", asyn
 });
 it("loads the selected file through RPC and switches the native viewer to Split", async () => {
   const loaded = await loadPluginApp(app);
-  const slot = renderSlot(loaded.threadPanelActions[0], { threadId: "one", params: { repositoryPath: repository.path, label: repository.label, path: "Cargo.cs", layer: "unstaged" } }, {
+  const slot = renderSlot(diffPanel(loaded), { threadId: "one", environment: null, params: { repositoryPath: repository.path, label: repository.label, path: "Cargo.cs", layer: "unstaged" } }, {
     settings: { project: "selected" }, rpc: { scope: () => ({ enabled: true }), diff: () => ({ patch: "@@ -1 +1 @@\n-old\n+new\n", binary: false, notice: null }) },
   });
   cleanup.push(() => slot.lifecycle.unmount());
@@ -124,7 +132,7 @@ it("groups linked checkouts, keeps a separate clone, and opens each checkout's d
   expect(slot.getAllByRole("button", { name: /^Collapse repository/ })).toHaveLength(2);
   expect(slot.getByText("worker")).toBeTruthy();
   fireEvent.click(slot.getByRole("button", { name: "Open Committed diff for sandbox/worker/Cargo.cs" }));
-  expect(slot.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "diff", title: "Cargo.cs", params: { repositoryPath: worker.path, label: worker.label, path: "Cargo.cs", layer: "committed", baseBranch: "main" } } });
+  expect(slot.inspection.experimental_panelCalls).toContainEqual({ method: "openTab", options: { tab: diffTab, title: "Cargo.cs", params: { repositoryPath: worker.path, label: worker.label, path: "Cargo.cs", layer: "committed", baseBranch: "main" } } });
 });
 it("collapses a checkout independently and restores its disclosure after remount", async () => {
   const main = { ...repository, commonDir: "/workspace/repos/cargo/.git", branch: "main" };
